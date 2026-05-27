@@ -20,11 +20,18 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 
+from . import export as export_mod
 from . import setup_wizard, storage
 from .camera import (
     PROFILE_PATH,
@@ -155,7 +162,14 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.get("/data", response_class=HTMLResponse)
     async def data_tab(request: Request):
-        return _stub_page(request, "Data", "Download + storage management — coming next milestone.")
+        return TEMPLATES.TemplateResponse(
+            request,
+            "data.html",
+            {
+                "storage": storage.disk_usage(),
+                "active_tab": "data",
+            },
+        )
 
     # --- Live stream (also used by the Setup wizard's Aim step) ----------
 
@@ -360,6 +374,47 @@ def _register_routes(app: FastAPI) -> None:
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+    # --- Export -----------------------------------------------------------
+
+    @app.get("/api/export/size")
+    async def get_export_size(
+        from_: str | None = Query(None, alias="from"),
+        to: str | None = Query(None),
+        scope: str | None = Query(None),
+    ):
+        try:
+            f, t = export_mod.resolve_range(scope=scope, date_from=from_, date_to=to)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return export_mod.compute_size(f, t)
+
+    @app.get("/api/export")
+    async def export_range(
+        from_: str | None = Query(None, alias="from"),
+        to: str | None = Query(None),
+        scope: str | None = Query(None),
+    ):
+        try:
+            f, t = export_mod.resolve_range(scope=scope, date_from=from_, date_to=to)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return _stream_tar_response(f, t)
+
+    @app.get("/api/export/day/{date}")
+    async def export_day(date: str):
+        # Single day = from == to.
+        if not storage._DATE_RE.match(date):
+            raise HTTPException(status_code=400, detail="Invalid date")
+        return _stream_tar_response(date, date)
+
+    @app.get("/api/export/all")
+    async def export_all():
+        try:
+            f, t = export_mod.resolve_range(scope="all", date_from=None, date_to=None)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return _stream_tar_response(f, t)
+
     # --- Setup wizard ----------------------------------------------------
 
     @app.post("/api/setup/detect")
@@ -402,6 +457,19 @@ def _register_routes(app: FastAPI) -> None:
         if not path.exists():
             raise HTTPException(status_code=404, detail="Not found")
         return FileResponse(path, media_type="image/jpeg")
+
+
+def _stream_tar_response(date_from: str, date_to: str) -> StreamingResponse:
+    """Wrap export_mod.stream_tar in a StreamingResponse with attachment headers."""
+    filename = export_mod.export_filename(date_from, date_to)
+    return StreamingResponse(
+        export_mod.stream_tar(date_from, date_to),
+        media_type="application/x-tar",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 def _stub_page(request: Request, title: str, body: str) -> HTMLResponse:
