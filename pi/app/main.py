@@ -19,13 +19,13 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 
-from . import setup_wizard
+from . import setup_wizard, storage
 from .camera import (
     PROFILE_PATH,
     PROFILE_SCHEMA_VERSION,
@@ -37,6 +37,7 @@ from .camera import (
     load_profile,
     save_profile,
 )
+from .capture import CaptureScheduler, NoProfileError
 from .mjpeg import mjpeg_stream
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,10 @@ async def _lifespan(app: FastAPI):
     If a profile is saved, apply it so the camera's current settings start
     from the calibrated values. Without this, the Live tab's first GET
     would return whatever picamera2 defaulted to.
+
+    Also creates the CaptureScheduler. If the persisted config says
+    `active=True`, the scheduler is started automatically (so a power
+    cycle resumes capture rather than silently turning it off).
     """
     log.info("Opening camera…")
     camera = CameraContext()
@@ -62,10 +67,26 @@ async def _lifespan(app: FastAPI):
         log.info("Applied saved profile (calibrated %s)", profile.calibrated_at)
     else:
         log.info("No saved profile; Live tab will start from camera defaults")
+
+    scheduler = CaptureScheduler(camera)
     app.state.camera = camera
+    app.state.scheduler = scheduler
+
+    if scheduler.config.active:
+        if profile is None:
+            log.warning("Persisted config says active=True but no profile; not starting")
+            # Leave config.active alone — user can fix profile and Start.
+        else:
+            try:
+                scheduler.start()
+            except NoProfileError:
+                log.warning("Refused to auto-start: no profile")
+
     try:
         yield
     finally:
+        log.info("Stopping scheduler…")
+        scheduler.stop()
         log.info("Closing camera…")
         camera.close()
 
@@ -120,7 +141,17 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.get("/capture", response_class=HTMLResponse)
     async def capture_tab(request: Request):
-        return _stub_page(request, "Capture", "Scheduled capture controls — coming next milestone.")
+        profile = load_profile()
+        scheduler = request.app.state.scheduler
+        return TEMPLATES.TemplateResponse(
+            request,
+            "capture.html",
+            {
+                "profile": profile,
+                "state": scheduler.state(),
+                "active_tab": "capture",
+            },
+        )
 
     @app.get("/data", response_class=HTMLResponse)
     async def data_tab(request: Request):
@@ -231,7 +262,103 @@ def _register_routes(app: FastAPI) -> None:
 
     @app.get("/api/capture/state")
     async def get_capture_state(request: Request):
-        return {"state": request.app.state.camera.state}
+        """Camera state (idle | streaming | capturing | snapshot | setup) +
+        capture scheduler stats. The Live tab polls this once per second
+        for the 'Capturing image…' overlay; the Capture tab uses the
+        scheduler section for today's counts."""
+        return {
+            "state": request.app.state.camera.state,
+            "scheduler": request.app.state.scheduler.state(),
+        }
+
+    # --- Capture scheduler -----------------------------------------------
+
+    @app.get("/api/capture/config")
+    async def get_capture_config(request: Request):
+        return request.app.state.scheduler.config.to_dict()
+
+    @app.patch("/api/capture/config")
+    async def patch_capture_config(request: Request):
+        try:
+            payload = await request.json()
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        try:
+            cfg = request.app.state.scheduler.update_config(**payload)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return cfg.to_dict()
+
+    @app.post("/api/capture/start")
+    async def capture_start(request: Request):
+        try:
+            request.app.state.scheduler.start()
+        except NoProfileError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        return request.app.state.scheduler.state()
+
+    @app.post("/api/capture/stop")
+    async def capture_stop(request: Request):
+        request.app.state.scheduler.stop()
+        return request.app.state.scheduler.state()
+
+    # --- Storage / days ---------------------------------------------------
+
+    @app.get("/api/storage")
+    async def get_storage():
+        return storage.disk_usage()
+
+    @app.get("/api/days")
+    async def get_days():
+        return {"days": storage.list_days()}
+
+    @app.get("/api/days/{date}/images")
+    async def get_day_images(date: str):
+        try:
+            return {"date": date, "images": storage.list_images(date)}
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"Day {date} not found")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.get("/api/days/{date}/images/{name}")
+    async def get_day_image(date: str, name: str):
+        try:
+            path = storage.image_path(date, name)
+        except (FileNotFoundError, ValueError) as e:
+            raise HTTPException(
+                status_code=404 if isinstance(e, FileNotFoundError) else 400,
+                detail=str(e),
+            )
+        return FileResponse(path, media_type="image/jpeg")
+
+    @app.delete("/api/days/{date}")
+    async def delete_day(date: str, confirm: bool = False):
+        if not confirm:
+            raise HTTPException(
+                status_code=400,
+                detail="Refused: pass ?confirm=true to delete",
+            )
+        try:
+            return storage.delete_day(date)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    @app.delete("/api/days")
+    async def delete_days(
+        from_: str = Query(..., alias="from"),
+        to: str = Query(...),
+        confirm: bool = False,
+    ):
+        if not confirm:
+            raise HTTPException(
+                status_code=400,
+                detail="Refused: pass ?confirm=true to delete",
+            )
+        try:
+            return storage.delete_range(from_, to)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     # --- Setup wizard ----------------------------------------------------
 

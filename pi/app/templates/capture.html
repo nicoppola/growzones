@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block content %}
+
+<h2>Capture</h2>
+
+{% if not profile %}
+<div class="card" style="border-color: var(--warn);">
+  <span class="badge warn">No camera profile</span>
+  <p>The capture scheduler refuses to start without a saved camera profile.</p>
+  <a href="/setup" class="button">Go to Setup →</a>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="row" style="justify-content: space-between;">
+    <div>
+      <h3 style="margin: 0;">Scheduler</h3>
+      <p class="muted" id="state-summary" style="margin: 6px 0 0;">loading…</p>
+    </div>
+    <div class="row">
+      <button id="btn-start" {% if not profile %}disabled{% endif %}>Start</button>
+      <button id="btn-stop" class="secondary">Stop</button>
+    </div>
+  </div>
+
+  <div class="kv" style="margin-top: 18px;" id="today-stats">
+    <dt>Saved today</dt><dd id="stat-saved">—</dd>
+    <dt>Dark-frame skips</dt><dd id="stat-dark">—</dd>
+    <dt>Out-of-window skips</dt><dd id="stat-window">—</dd>
+    <dt>Low-disk skips</dt><dd id="stat-disk">—</dd>
+    <dt>Errors</dt><dd id="stat-errors">—</dd>
+    <dt>Last capture</dt><dd id="stat-last">—</dd>
+  </div>
+
+  <div id="disk-warning" class="card" style="border-color: var(--warn); margin-top: 18px;" hidden>
+    <span class="badge warn">Low disk</span>
+    <span class="muted">Free space below 500 MB; captures paused automatically.</span>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top: 0;">Settings</h3>
+
+  <div class="control-group">
+    <label for="interval">
+      Capture interval
+      <output id="interval-out">{{ state.config.interval_seconds }} s ({{ '%.1f' | format(state.config.interval_seconds / 60) }} min)</output>
+    </label>
+    <input type="range" id="interval"
+           min="60" max="1800" step="30"
+           value="{{ state.config.interval_seconds }}">
+    <p class="hint">Plan default: 900s (15 min). Range 60–1800.</p>
+  </div>
+
+  <div class="control-group">
+    <label for="window-start">Window start (Pi-local time)</label>
+    <input type="time" id="window-start" value="{{ state.config.window_start }}">
+  </div>
+  <div class="control-group">
+    <label for="window-stop">Window stop (Pi-local time)</label>
+    <input type="time" id="window-stop" value="{{ state.config.window_stop }}">
+    <p class="hint">Default 05:00–22:00 covers daylight at any temperate latitude. Reversed window (e.g. 22:00 stop &lt; 05:00 start) wraps midnight.</p>
+  </div>
+
+  <div class="control-group">
+    <label for="dark-threshold">
+      Dark-frame skip threshold (mean V)
+      <output id="dark-threshold-out">{{ state.config.dark_skip_threshold }}</output>
+    </label>
+    <input type="range" id="dark-threshold"
+           min="0" max="100" step="1"
+           value="{{ state.config.dark_skip_threshold }}">
+    <p class="hint">0–255 scale; default 30. Frames below this are discarded (it's nighttime).</p>
+  </div>
+
+  <div class="row">
+    <button id="btn-save-config">Save settings</button>
+    <span id="config-status" class="hint"></span>
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top: 0;">Storage</h3>
+  <div class="kv" id="storage-stats">
+    <dt>Captures total</dt><dd id="storage-captures">—</dd>
+    <dt>Free disk</dt><dd id="storage-free">—</dd>
+    <dt>Day count</dt><dd id="storage-days">—</dd>
+  </div>
+  <p class="hint" style="margin-top: 14px;">Per-day breakdown and delete actions live in the <a href="/data">Data tab</a>.</p>
+</div>
+
+<style>
+  .control-group { margin-bottom: 18px; }
+  .control-group label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 14px;
+    margin-bottom: 6px;
+  }
+  .control-group label output {
+    color: var(--accent);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 13px;
+  }
+  .control-group input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+  .control-group input[type="time"] {
+    background: var(--panel-soft);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 10px;
+    color-scheme: dark;
+  }
+  .control-group .hint { margin: 4px 0 0; font-size: 12px; }
+  .good { color: var(--good); }
+  .bad  { color: var(--bad); }
+  .warn { color: var(--warn); }
+</style>
+
+<script>
+  window.GROWZONES = {
+    initialState: {{ state | tojson }},
+  };
+</script>
+<script src="/static/capture.js"></script>
+
+{% endblock %}
