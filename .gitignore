@@ -1,7 +1,28 @@
+# Local Claude session state
 .claude/
+
+# macOS
 .DS_Store
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# Virtualenvs (Pi creates ./pi/venv from install.sh; Mac uses ./mac/.venv)
 .venv/
 venv/
+
+# Defensive: app data should live in ~/Library/Application Support/growzones/
+# but exclude any stray local data/ in case Streamlit launches with the wrong CWD.
 data/
+
+# Streamlit runtime cache
+.streamlit/
+
+# Editors
+.vscode/
+.idea/
+*.swp

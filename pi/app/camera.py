@@ -149,6 +149,13 @@ class CameraContext:
     `current_state` is a string the live stream polls (via the `state`
     property below) to decide whether to overlay "Capturing image…" on a
     frozen frame.
+
+    Session settings (`current_settings`) are the camera's *currently
+    applied* values. They start from the saved profile and can be tweaked
+    via the Live tab without writing to disk. The capture worker (future
+    milestone) will apply profile values temporarily under the lock, then
+    restore these on release so the user's framing tweaks survive a
+    scheduled capture.
     """
 
     def __init__(self, camera_index: int = 0) -> None:
@@ -157,6 +164,7 @@ class CameraContext:
         self._state: str = "idle"
         self._configured_for: str | None = None  # "preview" | "still" | None
         self._sensor = detect_sensor()
+        self._current: dict[str, Any] = {}  # in-memory "what's applied right now"
 
     # ------------------------------ accessors ------------------------------
     @property
@@ -215,24 +223,45 @@ class CameraContext:
         lens_position: float | None = None,
         scaler_crop: tuple[int, int, int, int] | None = None,
     ) -> None:
-        """Set explicit manual values. Call under the lock."""
+        """Set explicit manual values + update `current_settings`. Call under the lock."""
         ctrls: dict[str, Any] = {}
         if exposure_time_us is not None:
             ctrls["ExposureTime"] = int(exposure_time_us)
             ctrls["AeEnable"] = False
+            self._current["exposure_time_us"] = int(exposure_time_us)
         if analogue_gain is not None:
             ctrls["AnalogueGain"] = float(analogue_gain)
             ctrls["AeEnable"] = False
+            self._current["analogue_gain"] = float(analogue_gain)
         if colour_gains is not None:
             ctrls["ColourGains"] = (float(colour_gains[0]), float(colour_gains[1]))
             ctrls["AwbEnable"] = False
+            self._current["colour_gains"] = [float(colour_gains[0]), float(colour_gains[1])]
         if lens_position is not None and self._sensor.supports_autofocus:
             ctrls["AfMode"] = controls.AfModeEnum.Manual
             ctrls["LensPosition"] = float(lens_position)
+            self._current["lens_position"] = float(lens_position)
         if scaler_crop is not None:
             ctrls["ScalerCrop"] = tuple(int(v) for v in scaler_crop)
+            self._current["scaler_crop"] = [int(v) for v in scaler_crop]
         if ctrls:
             self._cam.set_controls(ctrls)
+
+    def apply_profile(self, profile: "CameraProfile") -> None:
+        """Apply every setting from a saved profile. Call under the lock.
+        Used at startup and (eventually) before each scheduled capture."""
+        self.apply_manual(
+            exposure_time_us=profile.exposure_time_us,
+            analogue_gain=profile.analogue_gain,
+            colour_gains=tuple(profile.colour_gains),
+            lens_position=profile.lens_position,
+            scaler_crop=tuple(profile.scaler_crop),
+        )
+
+    @property
+    def current_settings(self) -> dict[str, Any]:
+        """Snapshot of what's currently applied to the camera."""
+        return dict(self._current)
 
     def apply_auto_exposure(self) -> dict[str, Any]:
         """Turn AE on, settle, then read the values it chose. Returns the
