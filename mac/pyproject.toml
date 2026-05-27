@@ -1,0 +1,27 @@
+[project]
+name = "growzones"
+version = "0.1.0"
+description = "GrowZones Mac side: import, cull, process, view captures from the Pi"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit",
+    "opencv-python",
+    "numpy",
+    "scikit-learn",   # KMeans
+    "scikit-image",   # SSIM for drift detection
+    "typer",
+    "pillow",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+growzones = "growzones.cli:app"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["growzones*"]

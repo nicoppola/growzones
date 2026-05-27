@@ -1,0 +1,28 @@
+[Unit]
+Description=GrowZones capture appliance
+Documentation=https://github.com/nicole/growzones
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+
+[Service]
+Type=exec
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/growzones
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/growzones/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 80
+Restart=always
+RestartSec=3
+
+# Hardening: this service binds privileged port 80 and uses the camera.
+# AmbientCapabilities lets the non-root pi user bind <1024 without setcap on the binary.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/growzones /home/pi/growzones
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
