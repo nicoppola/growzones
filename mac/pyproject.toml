@@ -9,6 +9,7 @@ dependencies = [
     "numpy",
     "scikit-learn",   # KMeans
     "scikit-image",   # SSIM for drift detection
+    "matplotlib",     # cm.get_cmap for the zone overlay palette
     "typer",
     "pillow",
 ]
