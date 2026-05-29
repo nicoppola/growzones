@@ -39,11 +39,15 @@ Prerequisites: Python 3.13 (`brew install python@3.13`) and ffmpeg
 (`brew install ffmpeg`).
 
 ```sh
-make install-mac     # create mac/.venv, pip install -e
+./mac/install.sh     # or: make install-mac
 make smoke           # run the end-to-end pipeline against a synthetic bundle
 make app             # launch Streamlit at http://localhost:8501
 make cli             # show the growzones CLI help
 ```
+
+`mac/install.sh` is idempotent — re-run safely. It checks prerequisites,
+creates `mac/.venv`, installs the package in editable mode, and verifies
+imports.
 
 The smoke test is genuinely end-to-end (synthesizes a Pi-style tar, imports it,
 runs auto-cull → tag → heatmap → zones → timelapse). If `make smoke` passes,
@@ -55,11 +59,16 @@ the Mac side is healthy.
    enable SSH, configure Wi-Fi, set your timezone. See PLAN.md
    "Installation prerequisites → A. Provision the SD card" for the full
    walkthrough.
-2. Boot the Pi, then from your Mac:
-   ```sh
-   make pi-deploy PI_HOST=growzones.local
-   ```
-   This rsyncs `pi/` to the Pi and runs `install.sh` over SSH.
+
+2. Get the code onto the Pi — pick whichever you prefer:
+   - **Clone the repo on the Pi:** `git clone <repo-url>` somewhere, then
+     `cd <clone>/pi && ./install.sh`
+   - **rsync just the Pi tree from your Mac:** `make pi-deploy PI_HOST=growzones.local`
+
+   `pi/install.sh` is path-agnostic — it substitutes the actual project
+   path into the systemd unit at install time, so it works regardless of
+   where the repo or `pi/` tree lives on the Pi.
+
 3. Open `http://growzones.local/` — first load redirects to the Setup tab.
 
 ## Repo layout

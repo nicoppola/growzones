@@ -6,7 +6,6 @@
 # Override on the command line: `make pi-deploy PI_HOST=mypi.local`
 PI_HOST ?= growzones.local
 MAC_VENV := mac/.venv
-PYTHON ?= python3.13
 
 help:
 	@echo "GrowZones make targets"
@@ -19,19 +18,7 @@ help:
 	@echo "  make clean          Remove mac/.venv and Python caches"
 
 install-mac:
-	@command -v $(PYTHON) >/dev/null 2>&1 || { \
-	  echo "ERROR: $(PYTHON) not found. Install with: brew install python@3.13"; \
-	  exit 1; \
-	}
-	@command -v ffmpeg >/dev/null 2>&1 || { \
-	  echo "ERROR: ffmpeg not found. Install with: brew install ffmpeg"; \
-	  exit 1; \
-	}
-	cd mac && $(PYTHON) -m venv .venv
-	$(MAC_VENV)/bin/pip install --upgrade pip --quiet
-	$(MAC_VENV)/bin/pip install -e ./mac
-	@echo
-	@echo "Done. Activate with: source $(MAC_VENV)/bin/activate"
+	./mac/install.sh
 
 smoke: $(MAC_VENV)/bin/python
 	cd mac && .venv/bin/python smoke_test.py

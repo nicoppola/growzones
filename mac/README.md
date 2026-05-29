@@ -10,20 +10,14 @@ See [`../PLAN.md`](../PLAN.md) for the architecture and full design.
 Prerequisites: Python 3.13 (`brew install python@3.13`) and ffmpeg
 (`brew install ffmpeg`).
 
-Easiest path is from the repo root:
-
 ```sh
-make install-mac
+./mac/install.sh
 ```
 
-…which is equivalent to:
+Idempotent — re-run safely. It verifies prerequisites, creates `mac/.venv`,
+installs the package in editable mode, and confirms the package imports.
 
-```sh
-cd mac/
-python3.13 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
+Equivalent from the repo root: `make install-mac`.
 
 ## Run
 
@@ -88,7 +82,8 @@ mac/
 │   │   ├── 03_Days.py
 │   │   ├── 04_Cull.py
 │   │   ├── 05_Process.py
-│   │   └── 06_Results.py
+│   │   ├── 06_Results.py
+│   │   └── 07_Pi.py            # deploy / status / logs (operational)
 │   ├── state.py                # st.session_state + .last_location helpers
 │   ├── cli.py                  # Typer CLI (growzones <cmd>)
 │   ├── locations.py            # locations.json + path resolver

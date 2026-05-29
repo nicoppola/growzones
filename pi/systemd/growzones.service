@@ -6,22 +6,25 @@ Wants=network-online.target time-sync.target
 
 [Service]
 Type=exec
-User=pi
-Group=pi
-WorkingDirectory=/home/pi/growzones
+# __SERVICE_USER__, __SERVICE_GROUP__, __PROJECT_DIR__ are substituted by
+# install.sh at install time so this works regardless of where the repo lives.
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__PROJECT_DIR__
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/pi/growzones/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 80
+ExecStart=__PROJECT_DIR__/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 80
 Restart=always
 RestartSec=3
 
 # Hardening: this service binds privileged port 80 and uses the camera.
-# AmbientCapabilities lets the non-root pi user bind <1024 without setcap on the binary.
+# AmbientCapabilities lets the non-root service user bind <1024 without
+# setcap on the binary.
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=read-only
-ReadWritePaths=/var/lib/growzones /home/pi/growzones
+ReadWritePaths=/var/lib/growzones __PROJECT_DIR__
 PrivateTmp=true
 
 [Install]

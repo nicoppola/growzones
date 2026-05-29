@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Idempotent install for the GrowZones Pi service.
 # Safe to re-run after partial failures; every step checks "already done?" first.
+# Path-agnostic: PROJECT_DIR is resolved from the script's own location and
+# substituted into the systemd unit at install time, so the repo can live
+# anywhere (e.g. `~/growzones/pi`, `~/code/growzones-repo/pi`, etc.).
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -8,6 +11,8 @@ VENV_DIR="${PROJECT_DIR}/venv"
 STATE_DIR="/var/lib/growzones"
 SERVICE_NAME="growzones"
 SERVICE_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
+SERVICE_USER="${SUDO_USER:-$USER}"
+SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
 
 say() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 
@@ -59,22 +64,31 @@ say "4/7  Install Pi app pip deps into venv"
 
 say "5/7  Create state dir at ${STATE_DIR}"
 if [[ ! -d "$STATE_DIR" ]]; then
-    require_root_for install -d -o "$USER" -g "$USER" "$STATE_DIR"
-    require_root_for install -d -o "$USER" -g "$USER" "${STATE_DIR}/setup_tests"
-    require_root_for install -d -o "$USER" -g "$USER" "${STATE_DIR}/captures"
+    require_root_for install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$STATE_DIR"
+    require_root_for install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "${STATE_DIR}/setup_tests"
+    require_root_for install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "${STATE_DIR}/captures"
 else
     echo "    ${STATE_DIR} already exists"
 fi
 
-say "6/7  Install systemd unit"
-SRC_UNIT="${PROJECT_DIR}/systemd/${SERVICE_NAME}.service"
-if [[ ! -f "$SRC_UNIT" ]]; then
-    echo "ERROR: unit file missing at $SRC_UNIT" >&2
+say "6/7  Install systemd unit (substituting PROJECT_DIR=${PROJECT_DIR}, user=${SERVICE_USER})"
+SRC_UNIT_TEMPLATE="${PROJECT_DIR}/systemd/${SERVICE_NAME}.service"
+if [[ ! -f "$SRC_UNIT_TEMPLATE" ]]; then
+    echo "ERROR: unit template missing at $SRC_UNIT_TEMPLATE" >&2
     exit 1
 fi
-# Compare to detect changes; copy + reload if different (or missing).
-if [[ ! -f "$SERVICE_UNIT" ]] || ! cmp -s "$SRC_UNIT" "$SERVICE_UNIT"; then
-    require_root_for cp "$SRC_UNIT" "$SERVICE_UNIT"
+# Render the template into a temp file with the resolved values, then install
+# only if the resulting content differs from what's already on disk.
+RENDERED_UNIT="$(mktemp /tmp/growzones-service.XXXXXX)"
+trap 'rm -f "$RENDERED_UNIT"' EXIT
+sed \
+    -e "s|__PROJECT_DIR__|${PROJECT_DIR}|g" \
+    -e "s|__SERVICE_USER__|${SERVICE_USER}|g" \
+    -e "s|__SERVICE_GROUP__|${SERVICE_GROUP}|g" \
+    "$SRC_UNIT_TEMPLATE" > "$RENDERED_UNIT"
+
+if [[ ! -f "$SERVICE_UNIT" ]] || ! cmp -s "$RENDERED_UNIT" "$SERVICE_UNIT"; then
+    require_root_for cp "$RENDERED_UNIT" "$SERVICE_UNIT"
     require_root_for systemctl daemon-reload
 fi
 require_root_for systemctl enable --now "$SERVICE_NAME"

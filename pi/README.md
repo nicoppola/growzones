@@ -9,21 +9,25 @@ walkthrough (Raspberry Pi Imager → SSH → `install.sh`).
 ## TL;DR install
 
 After provisioning the SD card with Raspberry Pi Imager (see PLAN.md
-"Installation prerequisites → A. Provision the SD card"), from your Mac:
+"Installation prerequisites → A. Provision the SD card"), pick one of:
 
 ```sh
+# Option A: clone the repo on the Pi, then run install.sh from the pi/ subdir.
+# Works anywhere — install.sh is path-agnostic.
+ssh pi@growzones.local
+git clone <repo-url> ~/growzones-repo
+cd ~/growzones-repo/pi
+./install.sh
+```
+
+```sh
+# Option B: rsync just the pi/ tree from your Mac.
 make pi-deploy PI_HOST=growzones.local
 ```
 
-This rsyncs `pi/` to the Pi and runs `install.sh` over SSH. If you prefer
-manual:
-
-```sh
-scp -r pi/ pi@growzones.local:/home/pi/growzones
-ssh pi@growzones.local
-cd /home/pi/growzones
-./install.sh
-```
+Either way, `install.sh` substitutes the actual project path into the
+systemd unit at install time, so it works regardless of where you put the
+code. The script is idempotent — safe to re-run if anything fails partway.
 
 Then open `http://growzones.local/` in your browser. First load redirects to
 the Setup tab if no camera profile exists.
