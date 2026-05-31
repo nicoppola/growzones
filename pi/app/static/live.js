@@ -19,7 +19,6 @@
     reset:       document.getElementById("reset-to-profile"),
     save:        document.getElementById("save-to-profile"),
     status:      document.getElementById("status"),
-    overlay:     document.getElementById("overlay"),
   };
 
   // --- slider -> PATCH (debounced; the camera doesn't love being hit every
@@ -189,17 +188,6 @@
       els.save.disabled = false;
     }
   });
-
-  // --- capture-state polling for "Capturing image…" overlay --------------
-  // Plan: poll once per second. Cheap, doesn't need WebSockets.
-  setInterval(async () => {
-    try {
-      const r = await fetch("/api/capture/state");
-      if (!r.ok) return;
-      const { state } = await r.json();
-      els.overlay.hidden = state !== "capturing";
-    } catch { /* offline; ignore */ }
-  }, 1000);
 
   // --- utilities ----------------------------------------------------------
   let statusTimer = null;

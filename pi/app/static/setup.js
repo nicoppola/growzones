@@ -59,8 +59,10 @@
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      // SSE records are separated by blank lines.
+      // Normalize CRLF → LF so blank-line splitting works regardless of the
+      // server's line ending. sse-starlette emits CRLF; without this the
+      // delimiter `\n\n` never matches and every event is dropped.
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
       let blank;
       while ((blank = buffer.indexOf("\n\n")) >= 0) {
         const record = buffer.slice(0, blank);
@@ -74,11 +76,16 @@
     // record looks like:
     //   event: <name>
     //   data: <json>
-    let evt = null, dataText = "";
+    // Lines starting with `:` are SSE comments (sse-starlette uses these as
+    // keepalive pings every 15s); skip records that contain only comments.
+    let evt = null, dataText = "", hasContent = false;
     for (const line of record.split("\n")) {
+      if (line.startsWith(":") || line === "") continue;
+      hasContent = true;
       if (line.startsWith("event:")) evt = line.slice(6).trim();
       else if (line.startsWith("data:")) dataText += line.slice(5).trim();
     }
+    if (!hasContent) return;
     let data;
     try { data = JSON.parse(dataText); } catch { data = {}; }
     handleEvent(evt, data);

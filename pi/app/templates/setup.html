@@ -30,7 +30,7 @@
 <div class="card" id="aim-card">
   <h3 style="margin-top: 0;">1. Aim the camera</h3>
   <p class="muted">Point the camera at your scene. Live preview below.</p>
-  <img id="preview" class="preview-frame" src="/stream.mjpg" alt="live preview">
+  <img id="preview" class="preview-frame" src="/stream.mjpg?t=setup" alt="live preview">
   <div class="row" style="margin-top: 14px;">
     <button id="start-calibration">{% if profile %}Re-calibrate{% else %}Start calibration{% endif %}</button>
     <span class="hint">Runs sensor detection → focus → exposure → white balance → test capture (~20 s).</span>

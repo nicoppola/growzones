@@ -12,6 +12,7 @@ dependencies = [
     "matplotlib",     # cm.get_cmap for the zone overlay palette
     "typer",
     "pillow",
+    "requests",       # Pi page HTTP client (Capture / Pi Data)
 ]
 
 [project.optional-dependencies]

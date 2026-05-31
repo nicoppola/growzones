@@ -8,12 +8,7 @@
     Bookmark <code>http://{{ request.url.hostname }}/</code> on your Mac for
     quick access.
   </p>
-  <div style="position: relative;">
-    <img id="preview" class="preview-frame" src="/stream.mjpg" alt="live preview">
-    <div id="overlay" class="preview-overlay" hidden>
-      <span>Capturing image…</span>
-    </div>
-  </div>
+  <img id="preview" class="preview-frame" src="/stream.mjpg?t=live" alt="live preview">
 </div>
 
 <div class="card">
@@ -110,18 +105,6 @@
     accent-color: var(--accent);
   }
   .control-group .hint { margin: 4px 0 0; font-size: 12px; }
-  .preview-overlay {
-    position: absolute;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.55);
-    color: var(--accent);
-    font-weight: 600;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 6px;
-    font-size: 16px;
-  }
 </style>
 
 <script>

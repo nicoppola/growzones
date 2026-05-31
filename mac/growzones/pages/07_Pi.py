@@ -20,29 +20,12 @@ from pathlib import Path
 import streamlit as st
 
 from growzones import state
-from growzones.locations import growzones_data_dir
+from growzones.pi_client import load_pi_host, save_pi_host, ssh_run
 
 
 st.set_page_config(page_title="Pi — GrowZones", layout="wide")
 
-_PI_HOST_FILE = growzones_data_dir() / ".pi_host"
-_DEFAULT_PI_HOST = "growzones.local"
 _TAIL_LINES = 30
-
-
-# ---------------------------------------------------------------------------
-# Persistence
-# ---------------------------------------------------------------------------
-
-def _load_pi_host() -> str:
-    if _PI_HOST_FILE.exists():
-        return _PI_HOST_FILE.read_text().strip() or _DEFAULT_PI_HOST
-    return _DEFAULT_PI_HOST
-
-
-def _save_pi_host(host: str) -> None:
-    growzones_data_dir()
-    _PI_HOST_FILE.write_text(host.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -73,18 +56,8 @@ def _git_porcelain(cwd: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# SSH helpers
+# Deploy
 # ---------------------------------------------------------------------------
-
-_SSH_FLAGS = ["-o", "ConnectTimeout=5", "-o", "BatchMode=yes"]
-
-
-def _ssh(host: str, remote_cmd: str, timeout: int = 15) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["ssh", *_SSH_FLAGS, f"pi@{host}", remote_cmd],
-        capture_output=True, text=True, timeout=timeout,
-    )
-
 
 def _stream_make_deploy(host: str, repo_root: Path, status) -> int:
     """Run `make pi-deploy PI_HOST=…` and stream stdout to the status widget.
@@ -137,24 +110,21 @@ def main() -> None:
 
     # --- Connection -----------------------------------------------------
     st.subheader("Connection")
-    saved_host = _load_pi_host()
+    saved_host = load_pi_host()
     host = st.text_input(
         "Pi hostname",
         value=saved_host,
         key="pi_host",
-        help="Hostname or IP of the Pi. Default is the mDNS name set in Raspberry Pi Imager.",
+        help="Hostname or IP of the Pi. Default is the mDNS name set in Raspberry Pi Imager. "
+             "Shared with the Capture and Pi Data pages.",
     )
     if host and host != saved_host:
-        _save_pi_host(host)
+        save_pi_host(host)
 
     if st.button("Test connection"):
         with st.spinner(f"Pinging pi@{host}…"):
-            try:
-                result = _ssh(host, "echo connected && systemctl is-active growzones", timeout=10)
-            except subprocess.TimeoutExpired:
-                st.error(f"Timed out connecting to pi@{host}.")
-                return
-        if result.returncode == 0:
+            result = ssh_run(host, "echo connected && systemctl is-active growzones", timeout=10)
+        if result.ok:
             st.success(f"Connected to {host}. Service status: {result.stdout.strip()!r}")
         else:
             st.error(
@@ -202,23 +172,15 @@ def main() -> None:
     cols = st.columns(2)
     if cols[0].button("systemctl status"):
         with st.spinner("Fetching status…"):
-            try:
-                result = _ssh(host, "systemctl status growzones --no-pager", timeout=15)
-            except subprocess.TimeoutExpired:
-                st.error("Timed out.")
-                return
+            result = ssh_run(host, "systemctl status growzones --no-pager", timeout=15)
         st.code(result.stdout + result.stderr, language="text")
     if cols[1].button(f"Last {_TAIL_LINES} log lines"):
         with st.spinner("Fetching logs…"):
-            try:
-                result = _ssh(
-                    host,
-                    f"journalctl -u growzones --no-pager -n {_TAIL_LINES}",
-                    timeout=15,
-                )
-            except subprocess.TimeoutExpired:
-                st.error("Timed out.")
-                return
+            result = ssh_run(
+                host,
+                f"journalctl -u growzones --no-pager -n {_TAIL_LINES}",
+                timeout=15,
+            )
         st.code(result.stdout + result.stderr, language="text")
 
 

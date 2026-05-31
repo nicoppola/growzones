@@ -159,11 +159,14 @@ class CameraContext:
     """
 
     def __init__(self, camera_index: int = 0) -> None:
+        # detect_sensor opens + closes a temporary Picamera2; run it BEFORE
+        # the persistent one so the camera isn't double-opened (which the
+        # ov5647 / Camera v1 rejects with "Device or resource busy").
+        self._sensor = detect_sensor()
         self._cam = Picamera2(camera_index)
         self._lock = threading.RLock()
         self._state: str = "idle"
         self._configured_for: str | None = None  # "preview" | "still" | None
-        self._sensor = detect_sensor()
         self._current: dict[str, Any] = {}  # in-memory "what's applied right now"
 
     # ------------------------------ accessors ------------------------------
@@ -267,6 +270,9 @@ class CameraContext:
         """Turn AE on, settle, then read the values it chose. Returns the
         metadata dict so the setup wizard can record what auto-exposure
         decided as a starting point. Call under the lock."""
+        # Camera must be configured + started before set_controls / capture,
+        # else capture_array blocks forever. Preview mode is fine for AE.
+        self._ensure_preview()
         self._cam.set_controls({"AeEnable": True})
         # Capture once to let AE settle.
         _ = self._cam.capture_array()
@@ -276,6 +282,7 @@ class CameraContext:
     def apply_auto_white_balance(self) -> tuple[float, float]:
         """Turn AWB on, settle, return the (red, blue) gains it chose.
         Then lock AWB off with those gains. Call under the lock."""
+        self._ensure_preview()
         self._cam.set_controls({"AwbEnable": True})
         _ = self._cam.capture_array()
         md = self._cam.capture_metadata()
@@ -344,6 +351,28 @@ class CameraContext:
             except Exception:
                 pass
             self._cam.close()
+
+    def reset(self) -> None:
+        """Close and reopen the underlying Picamera2 instance.
+
+        Rapid switching between preview and still configurations (as in the
+        setup wizard) can corrupt picamera2's internal DMA buffer queues
+        ("failed to find buffer in DmaSync"), leaving subsequent capture_array
+        calls hanging indefinitely. A fresh Picamera2 instance resets all
+        that state. Caller must hold the lock; callers outside the wizard
+        normally shouldn't need this.
+        """
+        with self._lock:
+            try:
+                self._cam.stop()
+            except Exception:
+                pass
+            try:
+                self._cam.close()
+            except Exception:
+                pass
+            self._cam = Picamera2(0)
+            self._configured_for = None
 
 
 class _CameraLockCtx:

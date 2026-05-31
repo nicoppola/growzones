@@ -9,7 +9,7 @@ dependencies = [
     "apscheduler",
     "jinja2",
     "python-multipart",
-    "sse-starlette",
+    "sse-starlette>=2.0,<3.0",
 ]
 
 [project.optional-dependencies]

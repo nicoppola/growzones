@@ -165,7 +165,19 @@ async def run_calibration(camera: CameraContext) -> AsyncIterator[dict]:
             "Exposure calibration is only accurate at midday clear-sky."
         )
 
+    # picamera2's DMA buffer queue can get corrupted by the preview ↔ still
+    # mode switching this pipeline does; without a reset, MJPEG capture_array
+    # silently hangs afterward. Must run BEFORE the final yield, because the
+    # browser typically closes the SSE stream the moment it sees `complete`,
+    # which cancels the generator before any post-yield work would run.
+    await asyncio.to_thread(_reset_camera, camera)
+
     yield _evt("complete", candidate=_candidate_payload(candidate))
+
+
+def _reset_camera(camera: CameraContext) -> None:
+    with camera.lock(state="setup"):
+        camera.reset()
 
 
 # ---------------------------------------------------------------------------
