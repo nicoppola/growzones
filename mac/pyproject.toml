@@ -1,25 +1,16 @@
 [project]
 name = "growzones"
-version = "0.1.0"
-description = "GrowZones Mac side: import, cull, process, view captures from the Pi"
+version = "0.2.0"
+description = "GrowZones Mac side: live view, calibrate, and download bundles from the Pi"
 requires-python = ">=3.11"
 dependencies = [
     "streamlit",
-    "opencv-python",
-    "numpy",
-    "scikit-learn",   # KMeans
-    "scikit-image",   # SSIM for drift detection
-    "matplotlib",     # cm.get_cmap for the zone overlay palette
-    "typer",
     "pillow",
-    "requests",       # Pi page HTTP client (Capture / Pi Data)
+    "requests",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
-
-[project.scripts]
-growzones = "growzones.cli:app"
 
 [build-system]
 requires = ["setuptools>=61"]

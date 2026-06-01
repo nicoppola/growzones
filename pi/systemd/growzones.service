@@ -12,9 +12,12 @@ User=__SERVICE_USER__
 Group=__SERVICE_GROUP__
 WorkingDirectory=__PROJECT_DIR__
 Environment=PYTHONUNBUFFERED=1
-ExecStart=__PROJECT_DIR__/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 80
+ExecStart=__PROJECT_DIR__/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 80 --timeout-graceful-shutdown 3
 Restart=always
 RestartSec=3
+# Long-lived MJPEG streams keep uvicorn from exiting on SIGTERM; bail after 5s.
+TimeoutStopSec=5
+KillMode=mixed
 
 # Hardening: this service binds privileged port 80 and uses the camera.
 # AmbientCapabilities lets the non-root service user bind <1024 without

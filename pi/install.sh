@@ -66,7 +66,7 @@ say "5/7  Create state dir at ${STATE_DIR}"
 if [[ ! -d "$STATE_DIR" ]]; then
     require_root_for install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "$STATE_DIR"
     require_root_for install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "${STATE_DIR}/setup_tests"
-    require_root_for install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "${STATE_DIR}/captures"
+    require_root_for install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" "${STATE_DIR}/sessions"
 else
     echo "    ${STATE_DIR} already exists"
 fi
@@ -91,20 +91,26 @@ if [[ ! -f "$SERVICE_UNIT" ]] || ! cmp -s "$RENDERED_UNIT" "$SERVICE_UNIT"; then
     require_root_for cp "$RENDERED_UNIT" "$SERVICE_UNIT"
     require_root_for systemctl daemon-reload
 fi
-require_root_for systemctl enable --now "$SERVICE_NAME"
+require_root_for systemctl enable "$SERVICE_NAME"
+# Restart on every install run so code changes from rsync are picked up.
+require_root_for systemctl restart "$SERVICE_NAME"
 
 say "7/7  Done"
 HOSTNAME_FQDN="$(hostname).local"
 cat <<EOF
 
-Setup complete. Open http://${HOSTNAME_FQDN}/ in your browser
-(from a Mac on the same network; mDNS resolves the hostname via Bonjour).
+Setup complete. The Pi is now serving the capture API on port 80.
+
+Verify from your Mac:
+  curl http://${HOSTNAME_FQDN}/api/health
+  # → {"ok": true, "has_profile": false, ...}
+
+Then launch the Mac app from the repo root:
+  make app
+The app's sidebar will ask for the Pi hostname (default: ${HOSTNAME_FQDN}).
 
 Useful commands:
   systemctl status ${SERVICE_NAME}        # is the service running?
   journalctl -u ${SERVICE_NAME} -f        # follow service logs
-  ls ${STATE_DIR}/                        # state on disk (profile, captures)
-
-If the camera profile hasn't been calibrated yet, the web UI will
-redirect you to the Setup tab on first load.
+  ls ${STATE_DIR}/                        # state on disk (profile, sessions)
 EOF

@@ -1,111 +1,81 @@
 # GrowZones
 
-A Raspberry Pi + Mac project for mapping how much direct sunlight each spot on
-your balcony actually gets across the day, so you can place plants where they
-will thrive.
+A Raspberry Pi Zero 2 W + camera that takes locked-exposure photos at a fixed
+interval, plus a Mac Streamlit app that drives it over the LAN. End goal:
+figure out where on your balcony plants get enough sun.
 
-A Pi Zero 2 W with a camera takes locked-exposure photos at fixed intervals;
-a Streamlit app on your Mac imports the bundles, runs a sun-mask + multi-day
-average, and produces a colored "zone" overlay you can read against your
-eyeball memory of where the sun actually hits.
+v2 is just the capture loop — live preview, calibration, sessions, download.
+Image analysis (heatmaps, zone overlays, timelapses) is deferred to a later
+version. See [`PLAN.md`](PLAN.md) for the full v2 design.
 
 ## Architecture
 
 ```
-[Pi Zero 2 W]                                  [Your Mac]
-  picamera2     ─┐                              ┌── Streamlit at localhost:8501
-  FastAPI       ─┤  live preview                │     Locations · Import · Days
-  APScheduler   ─┤  scheduled captures          │     Cull · Process · Results
-  storage       ─┘  tar export                  │
-                                                │  + `growzones` CLI
-       ▲                                        │  + per-day heatmaps, k=4 zones,
-       │  HTTP (LAN) ─── .tar export ──►        │    h264 timelapse
-       │                                        │
-   You ── browser                               └── data: ~/Library/App Support/growzones/
+[Pi Zero 2 W]                          [Your Mac]
+  picamera2                              Streamlit app — localhost:8501
+  FastAPI  ───── HTTP / JSON ────►         Camera page · Bundles page
 ```
 
-Pi is a capture appliance — live view + scheduled JPEGs + tar download.
-Mac is the data-exploration surface — import, cull, process, view results.
-Data flows one direction only: Pi → tar → Mac.
-
-See [`PLAN.md`](PLAN.md) for the full design (architecture, schemas,
-algorithm choices, the rationale behind every interesting decision).
+The Pi is a headless capture appliance. The Mac is the entire UI.
 
 ## Quickstart
 
-### Mac side
+### Mac
 
-Prerequisites: Python 3.13 (`brew install python@3.13`) and ffmpeg
-(`brew install ffmpeg`).
+Prerequisite: Python 3.13 (`brew install python@3.13`).
 
 ```sh
-./mac/install.sh     # or: make install-mac
-make smoke           # run the end-to-end pipeline against a synthetic bundle
-make app             # launch Streamlit at http://localhost:8501
-make cli             # show the growzones CLI help
+./mac/install.sh        # or: make install-mac
+make app                # launch Streamlit at http://localhost:8501
 ```
 
-`mac/install.sh` is idempotent — re-run safely. It checks prerequisites,
-creates `mac/.venv`, installs the package in editable mode, and verifies
-imports.
+The first launch shows the home page. Open **Camera** in the sidebar to see
+the live feed, run calibration, and start a capture session. Open **Bundles**
+to download finished sessions to this Mac.
 
-The smoke test is genuinely end-to-end (synthesizes a Pi-style tar, imports it,
-runs auto-cull → tag → heatmap → zones → timelapse). If `make smoke` passes,
-the Mac side is healthy.
+### Pi
 
-### Pi side
+1. Provision the SD card with Raspberry Pi Imager. Set hostname `growzones`,
+   enable SSH, configure Wi-Fi, set your timezone.
+2. Get the code onto the Pi:
+   - `make pi-deploy PI_HOST=growzones.local` (rsync + run `install.sh`), or
+   - clone the repo on the Pi and run `pi/install.sh` directly.
+3. Verify from the Mac: `curl http://growzones.local/api/health`.
 
-1. Provision the SD card with Raspberry Pi Imager — set hostname `growzones`,
-   enable SSH, configure Wi-Fi, set your timezone. See PLAN.md
-   "Installation prerequisites → A. Provision the SD card" for the full
-   walkthrough.
-
-2. Get the code onto the Pi — pick whichever you prefer:
-   - **Clone the repo on the Pi:** `git clone <repo-url>` somewhere, then
-     `cd <clone>/pi && ./install.sh`
-   - **rsync just the Pi tree from your Mac:** `make pi-deploy PI_HOST=growzones.local`
-
-   `pi/install.sh` is path-agnostic — it substitutes the actual project
-   path into the systemd unit at install time, so it works regardless of
-   where the repo or `pi/` tree lives on the Pi.
-
-3. Open `http://growzones.local/` — first load redirects to the Setup tab.
+`pi/install.sh` is idempotent — re-run safely. It enables the camera,
+installs the apt-side picamera2/numpy/pillow packages, creates a venv with
+`--system-site-packages`, pip installs the Pi app, creates `/var/lib/growzones/`,
+and installs + starts the systemd unit.
 
 ## Repo layout
 
 ```
 .
-├── PLAN.md             single source of truth for the design
-├── Makefile            install-mac, smoke, app, cli, pi-deploy, clean
+├── PLAN.md             v2 design
+├── Makefile            install-mac, app, pi-deploy, clean
 ├── pi/                 FastAPI capture appliance (runs on the Pi)
-│   ├── app/            camera, mjpeg, capture, storage, export, setup_wizard
+│   ├── app/            camera, mjpeg, calibrate, sessions, export, storage, main
 │   ├── systemd/        growzones.service
-│   ├── install.sh      idempotent provisioning script
-│   └── README.md
-├── mac/                Streamlit + CLI (runs on macOS)
-│   ├── growzones/      Python package
-│   │   ├── growzones_app.py
-│   │   ├── pages/      01_Locations … 06_Results
-│   │   └── *.py        locations, bundle, sun_mask, auto_cull, heatmap,
-│   │                   zones, timelapse, cli, state
-│   ├── smoke_test.py   end-to-end pipeline test against synthetic data
-│   └── README.md
-├── docs/
-│   └── CAMERA_SETUP.md walkthrough + troubleshooting for the calibration wizard
+│   └── install.sh      idempotent provisioning script
+├── mac/                Streamlit app (runs on macOS)
+│   └── growzones/
+│       ├── growzones_app.py   entry script
+│       ├── sidebar.py         Pi hostname + health badge
+│       ├── pi_client.py       requests wrapper around the Pi API
+│       ├── bundles.py         local bundle storage helpers
+│       └── pages/
+│           ├── 01_Camera.py
+│           └── 02_Bundles.py
 └── .gitignore
 ```
 
 ## State on disk
 
-- **Pi**: `/var/lib/growzones/` (camera_profile.json, setup_tests/, captures/)
-- **Mac**: `~/Library/Application Support/growzones/data/` (locations.json,
-  per-location captures + results)
-
-Nothing in this repo is written to at runtime; both apps write only to their
-respective state dirs.
+- **Pi**: `/var/lib/growzones/` (`camera_profile.json`, `setup_tests/`,
+  `sessions/<id>/`)
+- **Mac**: `~/Library/Application Support/growzones/` (`.pi_host`,
+  `bundles/<id>/`)
 
 ## License
 
-This is a personal project; no license file is included. Treat as
-"all rights reserved" unless you're me. If you fork it for your own balcony,
-have fun.
+Personal project; no license file included. Treat as all-rights-reserved.

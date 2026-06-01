@@ -1,65 +1,37 @@
 """Streamlit entrypoint for the GrowZones Mac app.
 
-Renders the sidebar location chooser (the one piece of UI shared by every
-page) and a welcome card on the main area. The six workflow pages live under
-`pages/` and are auto-discovered by Streamlit.
-
-Run with:  streamlit run growzones_app.py
+Run with:  streamlit run growzones/growzones_app.py
 """
 from __future__ import annotations
 
 import streamlit as st
 
-from growzones import state
-from growzones.locations import list_locations
+from growzones import bundles
+from growzones.sidebar import render_sidebar
 
 
 st.set_page_config(page_title="GrowZones", layout="wide")
+render_sidebar()
 
+st.title("GrowZones")
+st.markdown(
+    "Pi-based sun mapping for balcony plant planning. "
+    "Use the **Camera** page to see the live feed, run auto-calibrate, "
+    "tweak settings, and start a capture session. Use the **Bundles** page "
+    "to download finished sessions to this Mac."
+)
 
-def _welcome_card() -> None:
-    """Top-of-page intro shown when the user lands on the entrypoint."""
-    st.title("GrowZones")
-    st.write(
-        "Map how much direct sunlight each spot on your balcony gets, using "
-        "time-lapse photos from a Pi camera. Process them on your Mac to get "
-        "a per-pixel sun-hours heatmap and a zone overlay you can compare "
-        "against your eyeball memory of where the sun actually hits."
-    )
-    st.markdown("See [PLAN.md](../../PLAN.md) for the full design.")
-
-    st.subheader("How to use")
-    st.markdown(
-        "1. **Pick or create a location** in the sidebar (a balcony, a back "
-        "fence — whatever you're evaluating).\n"
-        "2. **Import** a `.tar` bundle downloaded from the Pi's web UI.\n"
-        "3. On the **Days** page, tag clear-sky days as `clear`.\n"
-        "4. On the **Cull** page, drop any frames where you walked through "
-        "or a bird flew past.\n"
-        "5. On the **Process** page, pick a date range and click Run.\n"
-        "6. View the heatmap, zone overlay, and timelapse on **Results**."
-    )
-
-
-def _get_started_card() -> None:
-    """Shown when no locations exist yet — fresh-install state."""
-    st.info(
-        "No locations yet. A location is a named container for a set of "
-        "captures (one physical camera position). Most people create one "
-        "while importing their first bundle on the Import page; you can also "
-        "create one manually on the Locations page."
-    )
-
-
-def main() -> None:
-    loc = state.location_selector_sidebar()
-    if loc is not None and loc.notes:
-        st.sidebar.caption(loc.notes)
-
-    _welcome_card()
-
-    if not list_locations():
-        _get_started_card()
-
-
-main()
+col_local, col_paths = st.columns(2)
+with col_local:
+    st.subheader("Local bundles")
+    local = bundles.list_local_bundles()
+    if not local:
+        st.caption("No bundles downloaded yet.")
+    else:
+        mb = bundles.total_local_bytes() / (1024**2)
+        st.caption(f"{len(local)} bundle(s) · {mb:.1f} MB total")
+        for b in local[:5]:
+            st.write(f"• `{b['id']}` — {b['image_count']} images")
+with col_paths:
+    st.subheader("Data location")
+    st.code(str(bundles.data_dir()), language="text")

@@ -1,19 +1,18 @@
 # GrowZones — Pi side
 
-Capture appliance: live MJPEG preview, scheduled JPEG captures with locked
-exposure, and a tar-export endpoint the Mac app pulls from.
+Capture appliance: live MJPEG, per-session timed JPEGs with locked exposure,
+and a tar-export endpoint the Mac app pulls from. No web UI on the Pi — the
+Mac Streamlit app is the only client.
 
-See [`../PLAN.md`](../PLAN.md) for the architecture and the full installation
-walkthrough (Raspberry Pi Imager → SSH → `install.sh`).
+See [`../PLAN.md`](../PLAN.md) for the architecture.
 
-## TL;DR install
+## Install
 
-After provisioning the SD card with Raspberry Pi Imager (see PLAN.md
-"Installation prerequisites → A. Provision the SD card"), pick one of:
+Provision the SD card with Raspberry Pi Imager (hostname `growzones`, enable
+SSH, set Wi-Fi + timezone). Then pick one:
 
 ```sh
-# Option A: clone the repo on the Pi, then run install.sh from the pi/ subdir.
-# Works anywhere — install.sh is path-agnostic.
+# Option A: clone the repo on the Pi
 ssh pi@growzones.local
 git clone <repo-url> ~/growzones-repo
 cd ~/growzones-repo/pi
@@ -21,86 +20,85 @@ cd ~/growzones-repo/pi
 ```
 
 ```sh
-# Option B: rsync just the pi/ tree from your Mac.
+# Option B: rsync the pi/ tree from your Mac
 make pi-deploy PI_HOST=growzones.local
 ```
 
-Either way, `install.sh` substitutes the actual project path into the
-systemd unit at install time, so it works regardless of where you put the
-code. The script is idempotent — safe to re-run if anything fails partway.
+`install.sh` is idempotent — safe to re-run. It substitutes the actual project
+path into the systemd unit so the repo can live anywhere on the Pi.
 
-Then open `http://growzones.local/` in your browser. First load redirects to
-the Setup tab if no camera profile exists.
+Verify from your Mac:
 
-## Web UI tabs
+```sh
+curl http://growzones.local/api/health
+# → {"ok": true, "has_profile": false, ...}
+```
 
-- **Setup** — calibration wizard (sensor detect → focus → exposure → WB → test
-  capture). SSE-narrated. Run once per scene; profile lives at
-  `/var/lib/growzones/camera_profile.json`.
-- **Live** — MJPEG view + manual exposure/gain/WB/zoom sliders + snapshot
-  button. Session-only tweaks; `[Save to profile]` persists. Polls
-  `/api/capture/state` for the "Capturing image…" overlay during scheduled
-  captures.
-- **Capture** — Start/Stop scheduler, interval slider, capture-window
-  (HH:MM), dark-skip threshold, today's saved/discarded counts. Refuses to
-  start without a profile. Auto-pauses below 500 MB free.
-- **Data** — date-range download with pre-flight size + ETA estimate, per-day
-  storage breakdown, two-step delete (per-day and per-range).
+Then launch the Mac app and use the Camera page to calibrate.
+
+## Endpoints
+
+| Path                                     | What                                |
+|------------------------------------------|-------------------------------------|
+| `GET  /stream.mjpg`                      | Live MJPEG                          |
+| `GET  /api/health`                       | health + has_profile + free bytes   |
+| `*    /api/camera/...`                   | profile, live settings, snapshot    |
+| `POST /api/setup/calibrate` + `GET status` | calibration wizard               |
+| `*    /api/sessions[/{id}[/stop|export]]` | session lifecycle + tar export      |
+
+See [`../PLAN.md`](../PLAN.md) for full schema details.
 
 ## Layout
 
 ```
 pi/
 ├── app/
-│   ├── main.py             FastAPI factory + routes
-│   ├── camera.py           picamera2 wrapper, shared lock, profile load/save
-│   ├── mjpeg.py            live MJPEG stream (non-blocking lock)
-│   ├── setup_wizard.py     calibration pipeline + SSE
-│   ├── capture.py          APScheduler + dark-frame skip + JSONL writer
-│   ├── storage.py          day listing, disk usage, atomic delete
-│   ├── export.py           streaming tar with manifest injection
-│   ├── templates/          setup.html, live.html, capture.html, data.html, base.html
-│   └── static/             setup.js, live.js, capture.js, data.js
-├── systemd/growzones.service   installed by install.sh; has time-sync.target dep
-├── install.sh              idempotent — re-run safely
-└── pyproject.toml          pip deps (picamera2 comes from apt, not pip)
+│   ├── main.py        FastAPI factory + routes + CORS
+│   ├── camera.py      picamera2 wrapper, shared lock
+│   ├── mjpeg.py       /stream.mjpg multipart generator
+│   ├── calibrate.py   background calibration pipeline + status tracker
+│   ├── sessions.py    session lifecycle + interval worker
+│   ├── export.py      streaming tar
+│   └── storage.py     /var/lib/growzones/ layout helpers
+├── systemd/growzones.service
+├── install.sh
+└── pyproject.toml     fastapi + uvicorn only (picamera2/numpy/pillow from apt)
 ```
 
 ## State on disk
 
-All Pi-writable state lives under `/var/lib/growzones/`:
-
 ```
 /var/lib/growzones/
-├── camera_profile.json       # produced by Setup wizard
-├── setup_tests/              # test captures from the wizard
-└── captures/
-    └── YYYY-MM-DD/
-        ├── HH-MM-SS.jpg
-        └── _pi_capture_log.jsonl
+├── camera_profile.json
+├── setup_tests/
+└── sessions/
+    └── <session_id>/
+        ├── manifest.json
+        ├── capture_log.jsonl
+        └── HH-MM-SS.jpg
 ```
 
 ## Troubleshooting
 
-- **`http://growzones.local/` won't load** — confirm the service is up:
-  `systemctl status growzones`, and that mDNS resolves:
-  `dns-sd -G v4 growzones.local` (on Mac) or `avahi-resolve -n growzones.local`
-  (on Pi).
-- **App errors** — `journalctl -u growzones -f` to follow logs.
-- **`picamera2` import error inside the venv** — the venv must be created with
-  `--system-site-packages` so apt-installed picamera2 is visible. `install.sh`
-  handles this; if you created the venv by hand, recreate it.
+- **`/api/health` doesn't respond** — `systemctl status growzones` to check
+  the service; `journalctl -u growzones -f` to follow logs. mDNS:
+  `dns-sd -G v4 growzones.local` (Mac) or `avahi-resolve -n growzones.local`
+  (Pi).
+- **`picamera2` import error inside the venv** — the venv must be created
+  with `--system-site-packages` so apt-installed picamera2 is visible.
+  `install.sh` does this; if you created the venv by hand, recreate it.
 - **Camera not detected** — `libcamera-hello --list-cameras` should list it.
-  If empty, check the CSI ribbon orientation (Pi Zero uses the narrow 22-pin
-  connector — needs the right adapter cable).
-- **Capture scheduler refuses to start** — that's by design when
-  `camera_profile.json` is missing. Open the Setup tab to calibrate.
+  If empty, check the CSI ribbon orientation.
+- **Calibration starts but never finishes** — check the calibration step
+  history via `GET /api/setup/status` from the Mac, or `journalctl` on the
+  Pi. The wizard caps exposure iterations at 6 and saves anyway with a
+  warning if it's still clipping.
 
 ## Development
 
 ```sh
-# On the Pi (or a Linux box with picamera2 + a camera attached):
 source venv/bin/activate
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
-Use port 8000 in development so the systemd service can keep port 80.
+
+Use port 8000 in dev so the systemd service can keep port 80.

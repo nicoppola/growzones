@@ -1,604 +1,202 @@
 """FastAPI app factory + routes.
 
-This milestone wires up:
-  - GET  /                       — Setup tab (or redirect to it if no profile)
-  - GET  /stream.mjpg            — MJPEG live stream (used by Setup's Aim step)
-  - GET  /api/camera/profile     — currently saved profile (404 if none)
-  - GET  /api/capture/state      — idle | streaming | setup | capturing
-  - POST /api/setup/detect       — sensor info (one-shot)
-  - POST /api/setup/calibrate    — SSE-streamed calibration pipeline
-  - POST /api/setup/save-profile — persist the candidate produced by calibrate
-  - GET  /api/setup/test-image/{name} — serve test captures from setup_tests/
-
-Live tab, Capture tab, Data tab are stubs returning a "coming soon" page.
+The Pi is a pure JSON/MJPEG API — no templates, no static files. The Mac
+Streamlit app is the only client.
 """
 from __future__ import annotations
 
-import json
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
+from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import (
-    FileResponse,
-    HTMLResponse,
-    JSONResponse,
-    RedirectResponse,
-    StreamingResponse,
-)
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from sse_starlette.sse import EventSourceResponse
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel
 
 from . import export as export_mod
-from . import setup_wizard, storage
-from .camera import (
-    PROFILE_PATH,
-    PROFILE_SCHEMA_VERSION,
-    SETUP_TESTS_DIR,
-    CameraContext,
-    CameraProfile,
-    SensorInfo,
-    iso_now_local,
-    load_profile,
-    save_profile,
-)
-from .capture import CaptureScheduler, NoProfileError
-from .mjpeg import mjpeg_stream
+from . import mjpeg, storage
+from .calibrate import CalibrationRunner
+from .camera import Camera
+from .sessions import NoProfileSaved, SessionAlreadyActive, SessionManager
 
-log = logging.getLogger(__name__)
-
-BASE_DIR = Path(__file__).parent
-TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+log = logging.getLogger("growzones")
 
 
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
-    """Open the camera once at startup; close it cleanly on shutdown.
+class SettingsPatch(BaseModel):
+    exposure_time_us: int | None = None
+    analogue_gain: float | None = None
+    colour_gains: list[float] | None = None
+    scaler_crop: list[int] | None = None
+    lens_position: float | None = None
 
-    If a profile is saved, apply it so the camera's current settings start
-    from the calibrated values. Without this, the Live tab's first GET
-    would return whatever picamera2 defaulted to.
 
-    Also creates the CaptureScheduler. If the persisted config says
-    `active=True`, the scheduler is started automatically (so a power
-    cycle resumes capture rather than silently turning it off).
-    """
-    log.info("Opening camera…")
-    camera = CameraContext()
-    profile = load_profile()
-    if profile is not None:
-        with camera.lock(state="setup"):
-            camera.apply_profile(profile)
-        log.info("Applied saved profile (calibrated %s)", profile.calibrated_at)
-    else:
-        log.info("No saved profile; Live tab will start from camera defaults")
-
-    scheduler = CaptureScheduler(camera)
-    app.state.camera = camera
-    app.state.scheduler = scheduler
-
-    if scheduler.config.active:
-        if profile is None:
-            log.warning("Persisted config says active=True but no profile; not starting")
-            # Leave config.active alone — user can fix profile and Start.
-        else:
-            try:
-                scheduler.start()
-            except NoProfileError:
-                log.warning("Refused to auto-start: no profile")
-
-    try:
-        yield
-    finally:
-        log.info("Stopping scheduler…")
-        scheduler.stop()
-        log.info("Closing camera…")
-        camera.close()
+class StartSessionBody(BaseModel):
+    interval_seconds: int = 900
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="GrowZones Pi", lifespan=_lifespan)
-    app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
-    _register_routes(app)
-    return app
+    camera = Camera()
+    sessions = SessionManager(camera)
+    calibrator = CalibrationRunner(camera)
 
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        storage.ensure_layout()
+        camera.start()
+        # If a profile is saved, apply it so the live preview reflects locked settings
+        profile = storage.load_profile()
+        if profile is not None:
+            camera.apply_settings({
+                "exposure_time_us": profile.get("exposure_time_us"),
+                "analogue_gain": profile.get("analogue_gain"),
+                "colour_gains": profile.get("colour_gains"),
+                "lens_position": profile.get("lens_position"),
+                "scaler_crop": profile.get("scaler_crop"),
+            })
+        log.info("growzones-pi ready")
+        yield
+        camera.stop()
 
-# Routes ---------------------------------------------------------------------
-
-def _register_routes(app: FastAPI) -> None:
-
-    @app.get("/", response_class=HTMLResponse)
-    async def root(request: Request):
-        """Always lands on Setup if no profile exists; otherwise Live."""
-        profile = load_profile()
-        if profile is None:
-            return RedirectResponse(url="/setup", status_code=303)
-        return RedirectResponse(url="/live", status_code=303)
-
-    # --- Tabs (server-rendered) ------------------------------------------
-
-    @app.get("/setup", response_class=HTMLResponse)
-    async def setup_tab(request: Request):
-        profile = load_profile()
-        return TEMPLATES.TemplateResponse(
-            request,
-            "setup.html",
-            {"profile": profile, "active_tab": "setup"},
-        )
-
-    @app.get("/live", response_class=HTMLResponse)
-    async def live_tab(request: Request):
-        profile = load_profile()
-        if profile is None:
-            # Live tab needs a profile to make sense (sliders default to it).
-            return RedirectResponse(url="/setup", status_code=303)
-        camera = request.app.state.camera
-        return TEMPLATES.TemplateResponse(
-            request,
-            "live.html",
-            {
-                "profile": profile,
-                "current_settings": camera.current_settings,
-                "sensor": camera.sensor,
-                "active_tab": "live",
-            },
-        )
-
-    @app.get("/capture", response_class=HTMLResponse)
-    async def capture_tab(request: Request):
-        profile = load_profile()
-        scheduler = request.app.state.scheduler
-        return TEMPLATES.TemplateResponse(
-            request,
-            "capture.html",
-            {
-                "profile": profile,
-                "state": scheduler.state(),
-                "active_tab": "capture",
-            },
-        )
-
-    @app.get("/data", response_class=HTMLResponse)
-    async def data_tab(request: Request):
-        return TEMPLATES.TemplateResponse(
-            request,
-            "data.html",
-            {
-                "storage": storage.disk_usage(),
-                "active_tab": "data",
-            },
-        )
-
-    # --- Live stream (also used by the Setup wizard's Aim step) ----------
+    app = FastAPI(title="growzones-pi", version="0.2.0", lifespan=lifespan)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.get("/stream.mjpg")
-    async def stream(request: Request):
-        return await mjpeg_stream(request.app.state.camera)
+    def stream() -> StreamingResponse:
+        return StreamingResponse(mjpeg.stream_generator(camera), media_type=mjpeg.content_type())
 
-    # --- Camera state / profile / live settings -------------------------
+    @app.get("/api/health")
+    def health() -> dict[str, Any]:
+        return {
+            "ok": True,
+            "has_profile": storage.PROFILE_PATH.exists(),
+            "pi_free_bytes": storage.free_bytes(),
+            "active_session_id": sessions.active_id(),
+        }
 
     @app.get("/api/camera/profile")
-    async def get_profile():
-        profile = load_profile()
+    def get_profile() -> dict[str, Any]:
+        profile = storage.load_profile()
         if profile is None:
-            raise HTTPException(status_code=404, detail="No saved profile")
-        return profile.to_dict()
-
-    @app.patch("/api/camera/profile")
-    async def patch_profile(request: Request):
-        """Save the current Live-tab session values into the profile on disk.
-
-        Wired to the [Save to profile] button. The body should be the full
-        new profile (same shape as the schema); validates ranges before
-        writing.
-        """
-        try:
-            payload = await request.json()
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid JSON body")
-        existing = load_profile()
-        if existing is None:
-            raise HTTPException(
-                status_code=409,
-                detail="No saved profile to update — run Setup first",
-            )
-        try:
-            new_profile = _merge_profile_patch(existing, payload)
-        except (ValueError, KeyError) as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        save_profile(new_profile)
-        return JSONResponse({"saved": True, "profile": new_profile.to_dict()})
+            raise HTTPException(404, "No camera profile saved")
+        return profile
 
     @app.get("/api/camera/settings")
-    async def get_settings(request: Request):
-        camera = request.app.state.camera
-        return {
-            "current": camera.current_settings,
-            "sensor": {
-                "model": camera.sensor.model,
-                "native_width": camera.sensor.native_width,
-                "native_height": camera.sensor.native_height,
-                "supports_autofocus": camera.sensor.supports_autofocus,
-            },
-        }
+    def get_settings() -> dict[str, Any]:
+        return camera.live_settings()
 
     @app.patch("/api/camera/settings")
-    async def patch_settings(request: Request):
-        """Apply session-only overrides on top of the saved profile.
+    def patch_settings(body: SettingsPatch) -> dict[str, Any]:
+        camera.apply_settings(body.model_dump(exclude_none=True))
+        return camera.live_settings()
 
-        Body: any subset of {exposure_time_us, analogue_gain, colour_gains,
-        lens_position, scaler_crop}. Returns the new effective values.
-        """
-        try:
-            payload = await request.json()
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid JSON body")
-        try:
-            kwargs = _validated_settings_kwargs(payload, request.app.state.camera.sensor)
-        except (ValueError, TypeError) as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        camera = request.app.state.camera
-        try:
-            with camera.lock(state="live", blocking=False):
-                camera.apply_manual(**kwargs)
-        except Exception as e:
-            raise HTTPException(status_code=503, detail=f"Camera busy: {e}")
-        return {"current": camera.current_settings}
+    @app.post("/api/camera/settings/save-to-profile")
+    def save_settings_to_profile() -> dict[str, Any]:
+        live = camera.live_settings()
+        if not live:
+            raise HTTPException(400, "No live settings to save")
+        sensor = camera.sensor_info()
+        profile = storage.load_profile() or {}
+        profile.update({
+            "schema_version": storage.SCHEMA_VERSION,
+            "calibrated_at": storage.now_iso(),
+            "sensor": sensor,
+            "exposure_time_us": live.get("exposure_time_us", profile.get("exposure_time_us")),
+            "analogue_gain": live.get("analogue_gain", profile.get("analogue_gain")),
+            "colour_gains": list(live.get("colour_gains", profile.get("colour_gains") or [])),
+            "lens_position": live.get("lens_position", profile.get("lens_position")),
+            "scaler_crop": list(live.get("scaler_crop", profile.get("scaler_crop") or [])),
+        })
+        storage.save_profile(profile)
+        return profile
 
     @app.post("/api/camera/snapshot")
-    async def snapshot(request: Request):
-        """One full-resolution JPEG with the current settings. Used by the
-        Live tab's Snapshot button for framing the scene."""
-        from datetime import datetime
-        from fastapi.responses import Response
-        camera = request.app.state.camera
-        # Capture in a thread so we don't block the event loop.
-        import asyncio
-        from PIL import Image
-        import io
-        def _grab() -> bytes:
-            with camera.lock(state="snapshot"):
-                arr = camera.capture_still_array()
-            buf = io.BytesIO()
-            Image.fromarray(arr).save(buf, format="JPEG", quality=92)
-            return buf.getvalue()
-        jpeg = await asyncio.to_thread(_grab)
-        ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-        return Response(
-            content=jpeg,
-            media_type="image/jpeg",
-            headers={
-                "Content-Disposition": f'attachment; filename="snapshot-{ts}.jpg"'
-            },
-        )
-
-    @app.get("/api/capture/state")
-    async def get_capture_state(request: Request):
-        """Camera state (idle | streaming | capturing | snapshot | setup) +
-        capture scheduler stats. The Live tab polls this once per second
-        for the 'Capturing image…' overlay; the Capture tab uses the
-        scheduler section for today's counts."""
-        return {
-            "state": request.app.state.camera.state,
-            "scheduler": request.app.state.scheduler.state(),
-        }
-
-    # --- Capture scheduler -----------------------------------------------
-
-    @app.get("/api/capture/config")
-    async def get_capture_config(request: Request):
-        return request.app.state.scheduler.config.to_dict()
-
-    @app.patch("/api/capture/config")
-    async def patch_capture_config(request: Request):
-        try:
-            payload = await request.json()
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid JSON body")
-        try:
-            cfg = request.app.state.scheduler.update_config(**payload)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        return cfg.to_dict()
-
-    @app.post("/api/capture/start")
-    async def capture_start(request: Request):
-        try:
-            request.app.state.scheduler.start()
-        except NoProfileError as e:
-            raise HTTPException(status_code=409, detail=str(e))
-        return request.app.state.scheduler.state()
-
-    @app.post("/api/capture/stop")
-    async def capture_stop(request: Request):
-        request.app.state.scheduler.stop()
-        return request.app.state.scheduler.state()
-
-    # --- Storage / days ---------------------------------------------------
-
-    @app.get("/api/storage")
-    async def get_storage():
-        return storage.disk_usage()
-
-    @app.get("/api/days")
-    async def get_days():
-        return {"days": storage.list_days()}
-
-    @app.get("/api/days/{date}/images")
-    async def get_day_images(date: str):
-        try:
-            return {"date": date, "images": storage.list_images(date)}
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail=f"Day {date} not found")
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-    @app.get("/api/days/{date}/images/{name}")
-    async def get_day_image(date: str, name: str):
-        try:
-            path = storage.image_path(date, name)
-        except (FileNotFoundError, ValueError) as e:
-            raise HTTPException(
-                status_code=404 if isinstance(e, FileNotFoundError) else 400,
-                detail=str(e),
-            )
-        return FileResponse(path, media_type="image/jpeg")
-
-    @app.delete("/api/days/{date}")
-    async def delete_day(date: str, confirm: bool = False):
-        if not confirm:
-            raise HTTPException(
-                status_code=400,
-                detail="Refused: pass ?confirm=true to delete",
-            )
-        try:
-            return storage.delete_day(date)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-    @app.delete("/api/days")
-    async def delete_days(
-        from_: str = Query(..., alias="from"),
-        to: str = Query(...),
-        confirm: bool = False,
-    ):
-        if not confirm:
-            raise HTTPException(
-                status_code=400,
-                detail="Refused: pass ?confirm=true to delete",
-            )
-        try:
-            return storage.delete_range(from_, to)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-    # --- Export -----------------------------------------------------------
-
-    @app.get("/api/export/size")
-    async def get_export_size(
-        from_: str | None = Query(None, alias="from"),
-        to: str | None = Query(None),
-        scope: str | None = Query(None),
-    ):
-        try:
-            f, t = export_mod.resolve_range(scope=scope, date_from=from_, date_to=to)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        return export_mod.compute_size(f, t)
-
-    @app.get("/api/export")
-    async def export_range(
-        from_: str | None = Query(None, alias="from"),
-        to: str | None = Query(None),
-        scope: str | None = Query(None),
-    ):
-        try:
-            f, t = export_mod.resolve_range(scope=scope, date_from=from_, date_to=to)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        return _stream_tar_response(f, t)
-
-    @app.get("/api/export/day/{date}")
-    async def export_day(date: str):
-        # Single day = from == to.
-        if not storage._DATE_RE.match(date):
-            raise HTTPException(status_code=400, detail="Invalid date")
-        return _stream_tar_response(date, date)
-
-    @app.get("/api/export/all")
-    async def export_all():
-        try:
-            f, t = export_mod.resolve_range(scope="all", date_from=None, date_to=None)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        return _stream_tar_response(f, t)
-
-    # --- Setup wizard ----------------------------------------------------
-
-    @app.post("/api/setup/detect")
-    async def setup_detect(request: Request):
-        sensor = request.app.state.camera.sensor
-        return {
-            "model": sensor.model,
-            "native_width": sensor.native_width,
-            "native_height": sensor.native_height,
-            "supports_autofocus": sensor.supports_autofocus,
-        }
+    def snapshot() -> Response:
+        jpeg, _meta = camera.capture_still()
+        return Response(content=jpeg, media_type="image/jpeg")
 
     @app.post("/api/setup/calibrate")
-    async def setup_calibrate(request: Request):
-        """SSE stream: detect → focus → exposure → WB → test capture."""
-        return EventSourceResponse(
-            setup_wizard.run_calibration(request.app.state.camera)
-        )
+    def start_calibrate() -> dict[str, Any]:
+        if not calibrator.start():
+            raise HTTPException(409, "Calibration already running")
+        return {"ok": True}
+
+    @app.get("/api/setup/status")
+    def setup_status() -> dict[str, Any]:
+        return calibrator.status()
 
     @app.post("/api/setup/save-profile")
-    async def setup_save_profile(request: Request):
-        try:
-            payload = await request.json()
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="Invalid JSON body")
-        try:
-            profile = setup_wizard.save_candidate(payload)
-        except (ValueError, KeyError) as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        return JSONResponse(
-            {"saved": True, "path": str(PROFILE_PATH), "profile": profile.to_dict()}
-        )
+    def save_profile_from_candidate() -> dict[str, Any]:
+        candidate = calibrator.candidate()
+        if candidate is None:
+            raise HTTPException(400, "No calibration candidate to save")
+        storage.save_profile(candidate)
+        # Saving the profile means "use this now" — push it onto the live
+        # camera so the MJPEG preview, snapshots, and any session captures
+        # immediately reflect the saved values.
+        camera.apply_settings({
+            "exposure_time_us": candidate.get("exposure_time_us"),
+            "analogue_gain": candidate.get("analogue_gain"),
+            "colour_gains": candidate.get("colour_gains"),
+            "lens_position": candidate.get("lens_position"),
+            "scaler_crop": candidate.get("scaler_crop"),
+        })
+        return candidate
 
     @app.get("/api/setup/test-image/{name}")
-    async def setup_test_image(name: str):
-        # Defend against path traversal: only the filename, no slashes.
-        if "/" in name or ".." in name:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-        path = SETUP_TESTS_DIR / name
-        if not path.exists():
-            raise HTTPException(status_code=404, detail="Not found")
+    def test_image(name: str) -> FileResponse:
+        path = storage.SETUP_TESTS_DIR / name
+        if not path.exists() or ".." in name:
+            raise HTTPException(404, "Test image not found")
         return FileResponse(path, media_type="image/jpeg")
 
+    @app.post("/api/sessions")
+    def start_session(body: StartSessionBody) -> dict[str, Any]:
+        try:
+            return sessions.start(body.interval_seconds)
+        except NoProfileSaved as e:
+            raise HTTPException(400, str(e))
+        except SessionAlreadyActive as e:
+            raise HTTPException(409, str(e))
 
-def _stream_tar_response(date_from: str, date_to: str) -> StreamingResponse:
-    """Wrap export_mod.stream_tar in a StreamingResponse with attachment headers."""
-    filename = export_mod.export_filename(date_from, date_to)
-    return StreamingResponse(
-        export_mod.stream_tar(date_from, date_to),
-        media_type="application/x-tar",
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Cache-Control": "no-store",
-        },
-    )
+    @app.post("/api/sessions/{session_id}/stop")
+    def stop_session(session_id: str) -> dict[str, Any]:
+        try:
+            return sessions.stop(session_id)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
 
+    @app.get("/api/sessions")
+    def list_sessions() -> list[dict[str, Any]]:
+        return sessions.list_sessions()
 
-def _stub_page(request: Request, title: str, body: str) -> HTMLResponse:
-    """Tiny placeholder for tabs not yet implemented in this milestone."""
-    return TEMPLATES.TemplateResponse(
-        request,
-        "base.html",
-        {
-            "title": title,
-            "active_tab": title.lower(),
-            "content_html": f"<p class='muted'>{body}</p>",
-        },
-    )
+    @app.get("/api/sessions/{session_id}/export")
+    def export_session(session_id: str) -> StreamingResponse:
+        if not storage.session_dir(session_id).exists():
+            raise HTTPException(404, "Session not found")
+        gen = export_mod.stream_session_tar(session_id)
+        return StreamingResponse(
+            gen,
+            media_type="application/x-tar",
+            headers={"Content-Disposition": f'attachment; filename="{export_mod.tar_filename(session_id)}"'},
+        )
 
+    @app.delete("/api/sessions/{session_id}")
+    def delete_session(session_id: str) -> dict[str, Any]:
+        if sessions.active_id() == session_id:
+            raise HTTPException(409, "Cannot delete the active session; stop it first")
+        if not storage.session_dir(session_id).exists():
+            raise HTTPException(404, "Session not found")
+        storage.delete_session(session_id)
+        return {"ok": True, "deleted": session_id}
 
-# ---------------------------------------------------------------------------
-# Validation helpers (kept here rather than in camera.py to keep camera.py
-# focused on the hardware side; these are the API-layer contracts).
-# ---------------------------------------------------------------------------
-
-# Reasonable per-control bounds. Wider than any real-world value to avoid
-# rejecting legitimate inputs, narrow enough to catch obvious bugs (negative
-# exposure, gain of 1000).
-_EXPOSURE_MIN_US = 1
-_EXPOSURE_MAX_US = 10_000_000   # 10 seconds; nothing realistic exceeds this
-_GAIN_MIN = 1.0
-_GAIN_MAX = 32.0
-_COLOUR_GAIN_MIN = 0.1
-_COLOUR_GAIN_MAX = 8.0
-
-
-def _validated_settings_kwargs(payload: dict, sensor: SensorInfo) -> dict:
-    """Return a kwargs dict safe to pass to CameraContext.apply_manual.
-
-    Rejects unknown keys and out-of-range values with a clear ValueError.
-    Coerces numeric types (JSON ints will arrive as int; we want float for
-    gains).
-    """
-    allowed = {
-        "exposure_time_us",
-        "analogue_gain",
-        "colour_gains",
-        "lens_position",
-        "scaler_crop",
-    }
-    extra = set(payload) - allowed
-    if extra:
-        raise ValueError(f"Unknown setting(s): {sorted(extra)}")
-    out: dict = {}
-    if "exposure_time_us" in payload:
-        v = int(payload["exposure_time_us"])
-        if not (_EXPOSURE_MIN_US <= v <= _EXPOSURE_MAX_US):
-            raise ValueError(f"exposure_time_us out of range [{_EXPOSURE_MIN_US}, {_EXPOSURE_MAX_US}]")
-        out["exposure_time_us"] = v
-    if "analogue_gain" in payload:
-        v = float(payload["analogue_gain"])
-        if not (_GAIN_MIN <= v <= _GAIN_MAX):
-            raise ValueError(f"analogue_gain out of range [{_GAIN_MIN}, {_GAIN_MAX}]")
-        out["analogue_gain"] = v
-    if "colour_gains" in payload:
-        cg = payload["colour_gains"]
-        if not (isinstance(cg, (list, tuple)) and len(cg) == 2):
-            raise ValueError("colour_gains must be [red, blue]")
-        r, b = float(cg[0]), float(cg[1])
-        for name, val in (("red", r), ("blue", b)):
-            if not (_COLOUR_GAIN_MIN <= val <= _COLOUR_GAIN_MAX):
-                raise ValueError(
-                    f"colour_gains {name}={val} out of range [{_COLOUR_GAIN_MIN}, {_COLOUR_GAIN_MAX}]"
-                )
-        out["colour_gains"] = (r, b)
-    if "lens_position" in payload:
-        if not sensor.supports_autofocus:
-            raise ValueError("lens_position rejected: sensor has no autofocus")
-        out["lens_position"] = float(payload["lens_position"])
-    if "scaler_crop" in payload:
-        sc = payload["scaler_crop"]
-        if not (isinstance(sc, (list, tuple)) and len(sc) == 4):
-            raise ValueError("scaler_crop must be [x, y, width, height]")
-        x, y, w, h = (int(v) for v in sc)
-        if w <= 0 or h <= 0:
-            raise ValueError("scaler_crop width/height must be > 0")
-        if x < 0 or y < 0:
-            raise ValueError("scaler_crop x/y must be >= 0")
-        if x + w > sensor.native_width or y + h > sensor.native_height:
-            raise ValueError(
-                f"scaler_crop exceeds sensor bounds ({sensor.native_width}x{sensor.native_height})"
-            )
-        out["scaler_crop"] = (x, y, w, h)
-    return out
-
-
-def _merge_profile_patch(existing: CameraProfile, payload: dict) -> CameraProfile:
-    """Build a new CameraProfile from an existing one + a PATCH body.
-
-    The PATCH body for /api/camera/profile is the full target profile shape
-    (the Live tab sends what it wants the new state to be). We validate
-    every field and bump `calibrated_at` to now so it's clear this profile
-    was edited manually rather than calibrated fresh.
-    """
-    sensor_payload = payload.get("sensor", existing.sensor.__dict__)
-    try:
-        sensor = SensorInfo(**sensor_payload)
-    except TypeError as e:
-        raise ValueError(f"Invalid sensor: {e}")
-    # Reuse the settings validator (raises on bad values).
-    kwargs = _validated_settings_kwargs(
-        {k: payload[k] for k in (
-            "exposure_time_us", "analogue_gain", "colour_gains",
-            "lens_position", "scaler_crop"
-        ) if k in payload},
-        sensor,
-    )
-    return CameraProfile(
-        schema_version=PROFILE_SCHEMA_VERSION,
-        calibrated_at=iso_now_local(),
-        sensor=sensor,
-        exposure_time_us=kwargs.get("exposure_time_us", existing.exposure_time_us),
-        analogue_gain=kwargs.get("analogue_gain", existing.analogue_gain),
-        colour_gains=(
-            list(kwargs["colour_gains"]) if "colour_gains" in kwargs
-            else existing.colour_gains
-        ),
-        lens_position=kwargs.get("lens_position", existing.lens_position),
-        scaler_crop=(
-            list(kwargs["scaler_crop"]) if "scaler_crop" in kwargs
-            else existing.scaler_crop
-        ),
-        test_capture_path=existing.test_capture_path,
-    )
+    return app
 
 
 app = create_app()
